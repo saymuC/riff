@@ -3087,8 +3087,7 @@ async function fetchFullSpotifyPlaylist(playlistId, accessToken) {
   const total = content.totalCount || content.items.length;
   const items = content.items.slice();
   let offset = items.length;
-  let guard = 0;
-  while (offset < total && guard++ < 100) {
+  while (offset < total) {
     const page = await pathfinderRequest(accessToken, { uri, offset, limit: 100, enableWatchFeedEntrypoint: true });
     const pageItems = page?.data?.playlistV2?.content?.items;
     if (!Array.isArray(pageItems) || pageItems.length === 0) throw new Error('Incomplete Pathfinder playlist');
@@ -3119,8 +3118,9 @@ async function trySpotifyWebApi(playlistId) {
       if (!Array.isArray(playlistItems?.items)) return null;
       let items = playlistItems.items.slice();
       let nextUrl = playlistItems?.next;
-      let guard = 0;
-      while (nextUrl && guard++ < 100) {
+      const visited = new Set();
+      while (nextUrl && !visited.has(nextUrl)) {
+        visited.add(nextUrl);
         const nextResp = await spotifyGetWithRetry(nextUrl);
         if (nextResp.status < 200 || nextResp.status >= 300) return null;
         const nextData = JSON.parse(nextResp.body);
@@ -3502,9 +3502,12 @@ async function handleAppleImport(req, res, inputUrl) {
     }
 
     const total = totalCount || tracks.length;
-    const hasMore = total > tracks.length;
+    if (total > tracks.length) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ success: false, error: 'Apple Music exposed only part of this playlist. Use Export files to import everything.' }));
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ success: true, name: plTitle || 'Apple Music Playlist', cover: plCover, tracks, hasMore, total }));
+    return res.end(JSON.stringify({ success: true, name: plTitle || 'Apple Music Playlist', cover: plCover, tracks, hasMore: false, total }));
   } catch (err) {
     try { logger.error('Apple import failed: ' + inputUrl, err); } catch (_) {}
     const isNet = err.message === 'timeout' || /fetch|network|dns|econnrefused|etimedout/i.test(err.message || '');
@@ -3570,7 +3573,7 @@ async function handlePlaylistImport(req, res, inputUrl) {
             platform: 'soundcloud',
             isCached: false
           }));
-          if (tracks.length > 0) {
+          if (tracks.length > 0 && Number(pl.track_count) === tracks.length) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({
               success: true,
@@ -3587,25 +3590,27 @@ async function handlePlaylistImport(req, res, inputUrl) {
     '--dump-single-json',
     '--no-warnings',
     '--no-check-certificates',
-    '--playlist-end',
-    '5000'
+    '--flat-playlist'
   ];
   if (platform === 'youtube') {
-    args.unshift('--flat-playlist');
     args.push('--extractor-args', 'youtube:player_client=android');
   }
   args.push(inputUrl);
 
   try {
-    let raw = await executeYtDlp(args, 60000);
+    let raw = await executeYtDlp(args, 180000);
     let data = JSON.parse(raw);
     let entries = Array.isArray(data.entries) ? data.entries : [data];
 
-    if (entries.length > 0 && !entries[0].title && args.includes('--flat-playlist')) {
+    if (entries.length > 0 && !entries[0].title && platform !== 'youtube') {
       const deepArgs = args.filter(a => a !== '--flat-playlist');
-      const deepRaw = await executeYtDlp(deepArgs, 60000);
+      const deepRaw = await executeYtDlp(deepArgs, 180000);
       data = JSON.parse(deepRaw);
       entries = Array.isArray(data.entries) ? data.entries : [data];
+    }
+
+    if (Number.isInteger(data.playlist_count) && data.playlist_count > entries.length) {
+      throw new Error(`Incomplete playlist: ${entries.length} of ${data.playlist_count} tracks returned`);
     }
 
     const tracks = [];

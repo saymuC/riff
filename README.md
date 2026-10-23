@@ -1,64 +1,72 @@
 <p align="center">
   <img src="banner.png?v=2" alt="Riff - desktop music player and audio suite for YouTube Music, SoundCloud, and local files" width="100%">
 </p>
-<div align="center">
-<table border="0">
-  <tr>
-    <td valign="middle" align="center">
-      <img src="github/readme/emoji.gif" width="64" height="64" alt="emoji">
-    </td>
-    <td valign="middle">
-      <h1>Riff</h1>
-    </td>
-  </tr>
-</table>
-<p align="center"><b>A free, open-source desktop music player for YouTube Music, SoundCloud, and local files. Built with Material Design 3, no tracking, and no account needed.</b></p>
-<img src="github/readme/emj.gif" width="20" height="20" align="absmiddle" alt="emoji">
+
 <p align="center">
-  <a href="https://github.com/rootscripts/riff/commits/main">
-    <img src="https://img.shields.io/github/last-commit/rootscripts/riff?style=for-the-badge&labelColor=16191C&color=94C9FF" alt="Last Commit">
+  <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/windows8/windows8-original.svg" width="22" height="22" alt="Windows">&nbsp;&nbsp;
+  <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/apple/apple-original.svg" width="22" height="22" alt="macOS">&nbsp;&nbsp;
+  <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/linux/linux-original.svg" width="22" height="22" alt="Linux">&nbsp;&nbsp;
+  <img src="https://cdn.simpleicons.org/ios/9ca3af" width="22" height="22" alt="iOS">&nbsp;&nbsp;
+  <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/icons/android/android-original.svg" width="22" height="22" alt="Android">
+</p>
+
+<h1 align="center">
+  <img src="github/readme/emoj2i.gif" width="48" height="48" align="absmiddle" alt="emoji">&nbsp;Riff
+</h1>
+
+<p align="center">
+  <b>A free, open-source desktop music player for YouTube Music, SoundCloud, and local files.</b><br>
+  Built with Material Design 3, no tracking, and no account needed.
+</p>
+
+<p align="center">
+  <a href="https://github.com/rootscripts/riff/releases">
+    <img src="https://img.shields.io/badge/Download-6750A4?style=for-the-badge&logo=download&logoColor=white" height="40" alt="Download">
   </a>
-  <a href="https://github.com/rootscripts/riff/stargazers">
-    <img src="https://img.shields.io/github/stars/rootscripts/riff?style=for-the-badge&labelColor=16191C&color=CAD3F5" alt="Stars">
-  </a>
-  <a href="https://github.com/rootscripts/riff">
-    <img src="https://img.shields.io/github/repo-size/rootscripts/riff?style=for-the-badge&labelColor=16191C&color=D0B4EB" alt="Repo Size">
-  </a>
-  <a href="https://github.com/rootscripts/riff/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/rootscripts/riff?style=for-the-badge&labelColor=16191C&color=8EEDD8" alt="License">
-  </a>
-  <a href="https://ko-fi.com/rootlesszen">
-    <img src="https://img.shields.io/badge/Ko--fi-rootlesszen?style=for-the-badge&logo=kofi&logoColor=white&labelColor=16191C&color=FF5E5B" alt="Support on Ko-fi">
+  &nbsp;
+  <a href="https://riff.hs.vc">
+    <img src="https://img.shields.io/badge/Website-1F2328?style=for-the-badge&logo=open-webui&logoColor=white" height="40" alt="Visit Website">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/rootscripts/riff/releases"><b>Download</b></a> ·
-  <a href="#core-features">Features</a> ·
-  <a href="#built-in-audio-suite">Audio Suite</a> ·
-  <a href="#material-design-3-expressive-ui">Interface</a> ·
-  <a href="#download-and-install">Install</a> ·
-  <a href="#faq">FAQ</a> ·
+  <a href="#core-features">Features</a> &nbsp;·&nbsp;
+  <a href="#built-in-audio-suite">Audio Suite</a> &nbsp;·&nbsp;
+  <a href="#material-design-3-expressive-ui">Interface</a> &nbsp;·&nbsp;
+  <a href="#download-and-install">Install</a> &nbsp;·&nbsp;
+  <a href="#faq">FAQ</a> &nbsp;·&nbsp;
   <a href="#build-from-source">Build</a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/rootscripts/riff/stargazers"><img src="https://img.shields.io/github/stars/rootscripts/riff?style=flat-square&labelColor=16191C&color=CAD3F5" alt="Stars"></a>
+  <a href="https://github.com/rootscripts/riff/commits/main"><img src="https://img.shields.io/github/last-commit/rootscripts/riff?style=flat-square&labelColor=16191C&color=94C9FF" alt="Last Commit"></a>
+  <a href="https://github.com/rootscripts/riff/blob/main/LICENSE"><img src="https://img.shields.io/github/license/rootscripts/riff?style=flat-square&labelColor=16191C&color=8EEDD8" alt="License"></a>
+  <a href="https://ko-fi.com/rootlesszen"><img src="https://img.shields.io/badge/Ko--fi-support-FF5E5B?style=flat-square&logo=kofi&logoColor=white&labelColor=16191C" alt="Support on Ko-fi"></a>
+</p>
+
+> [!NOTE]
+> **Pull requests are temporarily closed due to merge conflicts with an update coming soon (w global architecture change). Will be open when Riff updates.**
 ## What is Riff?
 
-Riff is an open-source, telemetry-free desktop audio hub and player for **Windows, Linux, and macOS**. It unifies playback across **YouTube Music**, **YouTube**, **SoundCloud**, and offline local media into a single high-performance interface without ads, subscriptions, or login constraints.
+Riff is an open-source, telemetry-free desktop music app and player for **Windows, Linux, and macOS**. It unifies playback across **YouTube Music**, **YouTube**, **SoundCloud**, and offline local media into a single high-performance interface without ads, subscriptions, or login constraints. Provides very fancy UI and layout.
 
 Built with **Electron**, **Vanilla JavaScript**, and **WebGL**, Riff provides responsive UI interactions and hardware-accelerated audio visualization without runtime framework overhead. The project is distributed under the **MIT license** and enforces strict privacy: all configuration, cached streams, and playback history remain strictly on the local machine.
 
-## Core Features
+## Features
 
-- **Ad-Free Streaming Hub**: Native stream resolution for YouTube Music, YouTube, and SoundCloud without third-party advertisements or account requirements.
-- **Offline Lossless Playback**: Full local library support for high-resolution formats including FLAC, WAV, MP3, OGG, and M4A.
-- **Built-in Audio Suite**: Integrated visual waveform editor for lossless trimming, 10-band equalizer, and real-time DSP effects (tempo, pitch shifting, studio reverb, distortion).
-- **1-Click Multi-Platform Playlist Migration**: Direct import and resolution of public playlists from Spotify, Apple Music, YouTube Music, and SoundCloud.
-- **Material Design 3 (M3 Expressive) UI**: Dynamic color extraction from album artwork, deep UI theming, responsive layout presets, and an integrated CSS editor.
+- High quality streaming with **YouTube Music, YouTube, and SoundCloud** without third-party advertisements or account requirements
+- **Offline lossless playback with full local library support** for high resolution formats including FLAC, WAV, MP3, OGG, and M4A.
+- **Easy built-in audio editor**, downloading with effects or trimming 10-band & 3-band equalizer, and real-time DSP effects (speed, pitch, reverb, distortion).
+- **1-Click multi-platform playlist migration**: Direct import and resolution of public playlists from Spotify, Apple Music, YouTube Music, and SoundCloud
+- **Material Design 3 UI**: Dynamic color extraction from album artwork, deep UI theming, responsive layout presets, and an integrated CSS editor
 - **Hardware-Accelerated Visuals**: Canvas and WebGL visualizers including real-time frequency analyzers, an interactive squiggly progress scrubber, and synchronized karaoke lyrics.
 - **Discord Rich Presence**: Real-time playback status reporting track metadata, artist info, and elapsed time to Discord.
 - **Zero Telemetry**: No tracking identifiers, analytics pings, or background data collection.
-
+- **Fullscreen mode** with fancy lyrics animation.
+- **Albums** - see all of your favorite artist albums.
+- **Customization** - built in theme editor, configure everything, and a CSS editor, with animated backgrounds and interface opacity sliders.
+- **Plugins** - built-in plugin feature where you can add a plugin to edit how Riff works with something or add a new function.
 ## Built-in Audio Suite
 
 Riff includes an integrated audio engineering toolkit accessible directly within the player interface:

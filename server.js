@@ -146,6 +146,7 @@ const vibeCache = new Map();
 const ytArtistCache = new Map();
 const downloadingSet = new Set();
 const prefetchingSet = new Set();
+const downloadInFlight = new Map();
 
 let currentAppState = {};
 const sseClients = new Set();
@@ -350,48 +351,57 @@ async function searchSoundcloud(query, limit = 14) {
     return searchCache.get(cacheKey);
   }
 
-  const args = [
-    `scsearch${limit}:${query}`,
-    '--dump-single-json',
-    '--flat-playlist',
-    '--skip-download',
-    '--no-warnings',
-    '--no-check-certificates'
-  ];
-  try {
-    const raw = await executeYtDlp(args, 18000);
-    const data = JSON.parse(raw);
-    const entries = (data.entries || []).map((item) => {
-      let thumbnail = '';
-      if (item.thumbnails && item.thumbnails.length > 0) {
-        thumbnail = item.thumbnails[item.thumbnails.length - 1].url;
-      } else if (item.thumbnail) {
-        thumbnail = item.thumbnail;
+  const searchPromise = (async () => {
+    const args = [
+      `scsearch${limit}:${query}`,
+      '--dump-single-json',
+      '--flat-playlist',
+      '--skip-download',
+      '--no-warnings',
+      '--no-check-certificates'
+    ];
+    try {
+      const raw = await executeYtDlp(args, 18000);
+      const data = JSON.parse(raw);
+      const entries = (data.entries || []).map((item) => {
+        let thumbnail = '';
+        if (item.thumbnails && item.thumbnails.length > 0) {
+          thumbnail = item.thumbnails[item.thumbnails.length - 1].url;
+        } else if (item.thumbnail) {
+          thumbnail = item.thumbnail;
+        }
+
+        const cleanTitle = (item.title || 'untitled');
+        const cleanArtist = (item.uploader || item.channel || item.artist || 'unknown artist');
+        const trackUrl = item.webpage_url || item.url || '';
+
+        return {
+          id: String(item.id || Math.random().toString(36).substring(2)),
+          title: cleanTitle,
+          artist: cleanArtist,
+          duration: item.duration || 0,
+          thumbnail: thumbnail,
+          url: trackUrl,
+          platform: 'soundcloud'
+        };
+      });
+
+      if (entries.length > 0) {
+        searchCache.set(cacheKey, entries);
+        setTimeout(() => { searchCache.delete(cacheKey); }, 300000);
+      } else if (searchCache.get(cacheKey) === searchPromise) {
+        searchCache.delete(cacheKey);
       }
-
-      const cleanTitle = (item.title || 'untitled');
-      const cleanArtist = (item.uploader || item.channel || item.artist || 'unknown artist');
-      const trackUrl = item.webpage_url || item.url || '';
-
-      return {
-        id: String(item.id || Math.random().toString(36).substring(2)),
-        title: cleanTitle,
-        artist: cleanArtist,
-        duration: item.duration || 0,
-        thumbnail: thumbnail,
-        url: trackUrl,
-        platform: 'soundcloud'
-      };
-    });
-
-    if (entries.length > 0) {
-      searchCache.set(cacheKey, entries);
-      setTimeout(() => { searchCache.delete(cacheKey); }, 300000);
+      return entries;
+    } catch (err) {
+      if (searchCache.get(cacheKey) === searchPromise) {
+        searchCache.delete(cacheKey);
+      }
+      return [];
     }
-    return entries;
-  } catch (err) {
-    return [];
-  }
+  })();
+  searchCache.set(cacheKey, searchPromise);
+  return searchPromise;
 }
 
 function buildDiscoveryQueries(profile) {
@@ -474,7 +484,15 @@ async function httpGetJson(url, timeoutMs = 6000) {
           return resolve(null);
         }
         let data = '';
-        res.on('data', chunk => { data += chunk; });
+        let bytesRead = 0;
+        res.on('data', chunk => {
+          bytesRead += chunk.length;
+          if (bytesRead > 1024 * 1024) {
+            res.destroy();
+            return resolve(null);
+          }
+          data += chunk;
+        });
         res.on('end', () => {
           try {
             resolve(JSON.parse(data));
@@ -506,15 +524,26 @@ async function dzArtistId(name) {
   if (cached && Date.now() < cached.expires) {
     return cached.id;
   }
-  try {
-    const url = `https://api.deezer.com/search/artist?q=${encodeURIComponent(name.trim())}&limit=1`;
-    const data = await httpGetJson(url, 6000);
-    const id = data?.data?.[0]?.id ? String(data.data[0].id) : null;
-    dzArtistIdCache.set(clean, { id, expires: Date.now() + 24 * 3600 * 1000 });
-    return id;
-  } catch (_) {
-    return null;
+  if (cached?.promise) {
+    return cached.promise;
   }
+
+  const lookupPromise = (async () => {
+    try {
+      const url = `https://api.deezer.com/search/artist?q=${encodeURIComponent(name.trim())}&limit=1`;
+      const data = await httpGetJson(url, 6000);
+      const id = data?.data?.[0]?.id ? String(data.data[0].id) : null;
+      dzArtistIdCache.set(clean, { id, expires: Date.now() + 24 * 3600 * 1000 });
+      return id;
+    } catch (_) {
+      if (dzArtistIdCache.get(clean)?.promise === lookupPromise) {
+        dzArtistIdCache.delete(clean);
+      }
+      return null;
+    }
+  })();
+  dzArtistIdCache.set(clean, { promise: lookupPromise, expires: 0 });
+  return lookupPromise;
 }
 
 async function dzRelatedTracks(artist) {
@@ -581,59 +610,69 @@ async function ytMixTracks(seed) {
   if (cached && Date.now() < cached.expires) {
     return cached.tracks;
   }
-
-  try {
-    const args = [
-      '--flat-playlist',
-      '--dump-single-json',
-      '--no-warnings',
-      '--no-check-certificates',
-      '--playlist-end',
-      '25',
-      '--extractor-args',
-      'youtube:player_client=android',
-      `https://www.youtube.com/watch?v=${id}&list=RD${id}`
-    ];
-    const raw = await executeYtDlp(args, 25000);
-    const data = JSON.parse(raw);
-    const entries = Array.isArray(data?.entries) ? data.entries : [];
-    const results = [];
-
-    entries.forEach((entry, index) => {
-      if (!entry || !entry.id || entry.id === id) return;
-      const duration = Number(entry.duration) || 0;
-      if (duration > 480) return;
-      const artist = entry.uploader || entry.channel || 'unknown artist';
-      const title = entry.title || 'untitled';
-      if (isSpamOrUnofficial(title, duration, artist)) return;
-
-      let thumbnail = '';
-      if (Array.isArray(entry.thumbnails) && entry.thumbnails.length > 0) {
-        thumbnail = entry.thumbnails[entry.thumbnails.length - 1].url || '';
-      } else if (entry.thumbnail) {
-        thumbnail = entry.thumbnail;
-      }
-
-      results.push({
-        id: entry.id,
-        title,
-        artist,
-        duration,
-        thumbnail,
-        url: `https://www.youtube.com/watch?v=${entry.id}`,
-        platform: 'youtube',
-        isCached: false,
-        match: 1 - (index / 25) * 0.5,
-        source: 'ytmix',
-        playable: true
-      });
-    });
-
-    ytMixCache.set(id, { expires: Date.now() + 30 * 60 * 1000, tracks: results });
-    return results;
-  } catch (_) {
-    return [];
+  if (cached?.promise) {
+    return cached.promise;
   }
+
+  const lookupPromise = (async () => {
+    try {
+      const args = [
+        '--flat-playlist',
+        '--dump-single-json',
+        '--no-warnings',
+        '--no-check-certificates',
+        '--playlist-end',
+        '25',
+        '--extractor-args',
+        'youtube:player_client=android',
+        `https://www.youtube.com/watch?v=${id}&list=RD${id}`
+      ];
+      const raw = await executeYtDlp(args, 25000);
+      const data = JSON.parse(raw);
+      const entries = Array.isArray(data?.entries) ? data.entries : [];
+      const results = [];
+
+      entries.forEach((entry, index) => {
+        if (!entry || !entry.id || entry.id === id) return;
+        const duration = Number(entry.duration) || 0;
+        if (duration > 480) return;
+        const artist = entry.uploader || entry.channel || 'unknown artist';
+        const title = entry.title || 'untitled';
+        if (isSpamOrUnofficial(title, duration, artist)) return;
+
+        let thumbnail = '';
+        if (Array.isArray(entry.thumbnails) && entry.thumbnails.length > 0) {
+          thumbnail = entry.thumbnails[entry.thumbnails.length - 1].url || '';
+        } else if (entry.thumbnail) {
+          thumbnail = entry.thumbnail;
+        }
+
+        results.push({
+          id: entry.id,
+          title,
+          artist,
+          duration,
+          thumbnail,
+          url: `https://www.youtube.com/watch?v=${entry.id}`,
+          platform: 'youtube',
+          isCached: false,
+          match: 1 - (index / 25) * 0.5,
+          source: 'ytmix',
+          playable: true
+        });
+      });
+
+      ytMixCache.set(id, { expires: Date.now() + 30 * 60 * 1000, tracks: results });
+      return results;
+    } catch (_) {
+      if (ytMixCache.get(id)?.promise === lookupPromise) {
+        ytMixCache.delete(id);
+      }
+      return [];
+    }
+  })();
+  ytMixCache.set(id, { expires: 0, promise: lookupPromise });
+  return lookupPromise;
 }
 
 async function gatherCandidates(seeds) {
@@ -767,32 +806,42 @@ async function resolveCandidate(c) {
   if (cached && Date.now() < cached.expires) {
     return cached.track;
   }
+  if (cached?.promise) {
+    return cached.promise;
+  }
 
-  let resolved = null;
-  try {
-    const candArtistNorm = normalizeArtistName(c.artist);
-    const candTitleNorm = (c.title || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
-    const query = `${c.artist} ${c.title}`.trim();
-    const scResults = await searchSoundcloud(query, 4);
+  const lookupPromise = (async () => {
+    let resolved = null;
+    try {
+      const candArtistNorm = normalizeArtistName(c.artist);
+      const candTitleNorm = (c.title || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+      const query = `${c.artist} ${c.title}`.trim();
+      const scResults = await searchSoundcloud(query, 4);
 
-    for (const r of (scResults || [])) {
-      const rArtistNorm = normalizeArtistName(r.artist || r.uploader || '');
-      const rTitleNorm = (r.title || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
-      const artistMatch = rArtistNorm.includes(candArtistNorm) || candArtistNorm.includes(rArtistNorm);
-      const titleMatch = rTitleNorm.includes(candTitleNorm) || candTitleNorm.includes(rTitleNorm);
-      if (artistMatch && titleMatch) {
-        resolved = normalizeTrack(r);
-        break;
+      for (const r of (scResults || [])) {
+        const rArtistNorm = normalizeArtistName(r.artist || r.uploader || '');
+        const rTitleNorm = (r.title || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+        const artistMatch = rArtistNorm.includes(candArtistNorm) || candArtistNorm.includes(rArtistNorm);
+        const titleMatch = rTitleNorm.includes(candTitleNorm) || candTitleNorm.includes(rTitleNorm);
+        if (artistMatch && titleMatch) {
+          resolved = normalizeTrack(r);
+          break;
+        }
       }
+    } catch (_) {}
+
+    if (resolvedCache.get(key)?.promise === lookupPromise) {
+      resolvedCache.set(key, { expires: Date.now() + 24 * 3600 * 1000, track: resolved });
     }
-  } catch (_) {}
+    return resolved;
+  })();
 
   if (resolvedCache.size >= 500) {
     const oldest = resolvedCache.keys().next().value;
     resolvedCache.delete(oldest);
   }
-  resolvedCache.set(key, { expires: Date.now() + 24 * 3600 * 1000, track: resolved });
-  return resolved;
+  resolvedCache.set(key, { expires: 0, promise: lookupPromise });
+  return lookupPromise;
 }
 
 function pickWeightedSeeds(seeds, count = 4) {
@@ -1428,11 +1477,32 @@ async function searchYtmTracks(query, limit = 16) {
 
 async function handleSearch(req, res, query, platform = 'youtube', limit = 20) {
   const cacheKey = `${platform}:${query}:${limit}`;
-  if (searchCache.has(cacheKey)) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(searchCache.get(cacheKey)));
+  while (true) {
+    const cached = searchCache.get(cacheKey);
+    if (cached === undefined) break;
+    if (cached?.promise instanceof Promise) {
+      const outcome = await cached.promise;
+      res.writeHead(outcome.status, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(outcome.body));
+    }
+    if (searchCache.has(cacheKey)) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(cached));
+    }
   }
 
+  let resolveSearchOutcome;
+  const searchOutcome = new Promise(resolve => { resolveSearchOutcome = resolve; });
+  const cacheEntry = { promise: searchOutcome };
+  searchCache.set(cacheKey, cacheEntry);
+  let responseOutcome = null;
+  const sendResponse = (status, body) => {
+    responseOutcome = { status, body };
+    resolveSearchOutcome(responseOutcome);
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(body));
+  };
+  try {
   if (platform === 'youtube') {
     try {
       const directTracks = await directYoutubeSearch(query);
@@ -1446,8 +1516,7 @@ async function handleSearch(req, res, query, platform = 'youtube', limit = 20) {
           }
         }, 100);
 
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify(result));
+        return sendResponse(200, result);
       }
     } catch (e) {}
   }
@@ -1469,8 +1538,7 @@ async function handleSearch(req, res, query, platform = 'youtube', limit = 20) {
           setTimeout(() => {
             if (entries[0] && entries[0].url) prefetchTrack(entries[0].url, entries[0].id, 'youtube').catch(() => {});
           }, 60);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify(result));
+          return sendResponse(200, result);
         } else {
           ytmFailCount++;
           if (ytmFailCount >= 3) {
@@ -1576,11 +1644,9 @@ async function handleSearch(req, res, query, platform = 'youtube', limit = 20) {
       setTimeout(() => {
         if (entries[0] && entries[0].url) prefetchTrack(entries[0].url, entries[0].id, 'youtube').catch(() => {});
       }, 60);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(result));
+      return sendResponse(200, result);
     } catch (err) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ success: false, tracks: [], error: 'YouTube Music is unavailable' }));
+      return sendResponse(200, { success: false, tracks: [], error: 'YouTube Music is unavailable' });
     }
   }
 
@@ -1638,11 +1704,19 @@ async function handleSearch(req, res, query, platform = 'youtube', limit = 20) {
       if (entries[0] && entries[0].url) prefetchTrack(entries[0].url, entries[0].id, platform).catch(() => {});
     }, 60);
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(result));
+    return sendResponse(200, result);
   } catch (err) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: false, error: err.message }));
+    return sendResponse(500, { success: false, error: err.message });
+  }
+  } finally {
+    if (!responseOutcome) {
+      const outcome = { status: 500, body: { success: false, error: 'Search failed' } };
+      responseOutcome = outcome;
+      resolveSearchOutcome(outcome);
+    }
+    if (searchCache.get(cacheKey) === cacheEntry) {
+      searchCache.delete(cacheKey);
+    }
   }
 }
 
@@ -1704,6 +1778,11 @@ async function handleStreamInfo(req, res, trackUrl, trackId, platform = 'youtube
   const cacheKey = (cleanId || trackUrl || `${artist}_${title}`).toLowerCase();
   if (cacheKey && (streamUrlCache.has(cacheKey) || (cleanId && streamUrlCache.has(cleanId)))) {
     const cached = streamUrlCache.get(cacheKey) || (cleanId ? streamUrlCache.get(cleanId) : null);
+    if (cached?.promise) {
+      const outcome = await cached.promise;
+      res.writeHead(outcome.success ? 200 : 500, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(outcome));
+    }
     if (cached && (Date.now() - cached.timestamp < 1800000)) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (cleanId) setTimeout(() => downloadTrackToDisk(trackUrl, cleanId, platform, meta), 10000);
@@ -1711,6 +1790,12 @@ async function handleStreamInfo(req, res, trackUrl, trackId, platform = 'youtube
     }
   }
 
+  let resolveLookup;
+  const lookupPromise = new Promise(resolve => { resolveLookup = resolve; });
+  const inFlightEntry = { promise: lookupPromise };
+  if (cacheKey) streamUrlCache.set(cacheKey, inFlightEntry);
+
+  try {
   if (platform === 'youtube' && (!trackUrl || !trackUrl.startsWith('http')) && cleanId) {
     trackUrl = `https://www.youtube.com/watch?v=${cleanId}`;
   }
@@ -1746,8 +1831,13 @@ async function handleStreamInfo(req, res, trackUrl, trackId, platform = 'youtube
 
   if (!streamUrl) {
     try { logger.error('Stream resolve failed: ' + (title || trackUrl)); } catch (_) {}
+    const failure = { success: false, error: 'could not extract audio stream' };
+    resolveLookup(failure);
+    if (cacheKey && streamUrlCache.get(cacheKey) === inFlightEntry) {
+      streamUrlCache.delete(cacheKey);
+    }
     res.writeHead(500, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ success: false, error: 'could not extract audio stream' }));
+    return res.end(JSON.stringify(failure));
   }
 
   const isHls = streamUrl.includes('.m3u8');
@@ -1759,12 +1849,22 @@ async function handleStreamInfo(req, res, trackUrl, trackId, platform = 'youtube
     proxyUrl: `http://127.0.0.1:${PORT}/api/audio-proxy?url=${encodeURIComponent(streamUrl)}`
   };
 
+  resolveLookup(data);
   if (cacheKey) streamUrlCache.set(cacheKey, { timestamp: Date.now(), data });
   if (cleanId && cleanId !== cacheKey) streamUrlCache.set(cleanId, { timestamp: Date.now(), data });
   if (cleanId) setTimeout(() => downloadTrackToDisk(trackUrl, cleanId, platform, meta), 10000);
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
+  } catch (error) {
+    const failure = { success: false, error: error.message };
+    resolveLookup(failure);
+    if (cacheKey && streamUrlCache.get(cacheKey) === inFlightEntry) {
+      streamUrlCache.delete(cacheKey);
+    }
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(failure));
+  }
 }
 
 async function fetchArtistInfo(artistName) {
@@ -2171,6 +2271,107 @@ async function cleanupDownloadArtifacts(dir, beforeSet, baseName, videoId, chose
   } catch (_) {}
 }
 
+// ---- cover art for local library tracks: embedded picture first, then iTunes ----
+const localCoverQueued = new Set();
+const localCoverQueue = [];
+let localCoverWorking = false;
+let lastOnlineCoverLookup = 0;
+
+function localCoverPath(id) {
+  return path.join(THUMBNAILS_DIR, `localcover_${id}.jpg`);
+}
+
+function extractEmbeddedCover(src, dest) {
+  return new Promise((resolve) => {
+    const ffmpegBin = resolveBinary('ffmpeg');
+    if (!ffmpegBin || !fs.existsSync(src)) return resolve(false);
+    const tmp = `${dest}.tmp.jpg`;
+    let proc;
+    try {
+      proc = spawn(ffmpegBin, ['-y', '-v', 'error', '-i', src, '-map', '0:v:0', '-frames:v', '1', '-vf', "scale='min(600,iw)':-2", tmp], { windowsHide: true });
+    } catch (e) { return resolve(false); }
+    const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch (_) {} }, 20000);
+    proc.on('error', () => { clearTimeout(timer); resolve(false); });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      try {
+        if (code === 0 && fs.existsSync(tmp) && fs.statSync(tmp).size > 500) {
+          fs.renameSync(tmp, dest);
+          return resolve(true);
+        }
+        fs.rmSync(tmp, { force: true });
+      } catch (_) {}
+      resolve(false);
+    });
+  });
+}
+
+async function fetchOnlineCover(item, dest) {
+  try {
+    const norm = (s) => (s || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+    const title = (item.title || '').replace(/\(.*?\)|\[.*?\]/g, '').trim();
+    if (!title) return false;
+    const artist = item.artist && !/^unknown artist$/i.test(item.artist) ? item.artist : '';
+    const term = `${artist} ${title}`.trim();
+    const data = await fetchItunesJson(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=song&limit=5${itunesCountryParam()}`);
+    const results = (data && Array.isArray(data.results)) ? data.results : [];
+    const hit = results.find(r => r && r.artworkUrl100 && norm(r.trackName).includes(norm(title)) && (!artist || norm(r.artistName).includes(norm(artist)) || norm(artist).includes(norm(r.artistName))));
+    if (!hit) return false;
+    const res = await fetch(hit.artworkUrl100.replace('100x100', '600x600'));
+    if (!res.ok) return false;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length < 500) return false;
+    await fs.promises.writeFile(dest, buf);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function processLocalCovers() {
+  if (localCoverWorking) return;
+  localCoverWorking = true;
+  try {
+    while (localCoverQueue.length) {
+      const id = localCoverQueue.shift();
+      const item = libraryIndex[id];
+      if (!item) continue;
+      const dest = localCoverPath(id);
+      if (fs.existsSync(dest)) continue;
+      let ok = await extractEmbeddedCover(path.join(LIBRARY_DIR, item.file), dest);
+      if (!ok) {
+        // iTunes allows only a few lookups per minute, so space them out
+        const wait = 4000 - (Date.now() - lastOnlineCoverLookup);
+        if (wait > 0) await new Promise(r => setTimeout(r, wait));
+        lastOnlineCoverLookup = Date.now();
+        ok = await fetchOnlineCover(item, dest);
+      }
+    }
+  } finally {
+    localCoverWorking = false;
+  }
+}
+
+function queueLocalCovers(ids) {
+  for (const id of ids) {
+    if (localCoverQueued.has(id) || fs.existsSync(localCoverPath(id))) continue;
+    localCoverQueued.add(id);
+    localCoverQueue.push(id);
+  }
+  if (localCoverQueue.length) processLocalCovers().catch(() => {});
+}
+
+function handleLocalCover(req, res, parsedUrl) {
+  const id = String(parsedUrl.query.id || '');
+  const file = /^[\w-]{1,64}$/.test(id) && libraryIndex[id] ? localCoverPath(id) : '';
+  if (!file || !fs.existsSync(file)) {
+    res.writeHead(404);
+    return res.end();
+  }
+  res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'max-age=3600' });
+  fs.createReadStream(file).pipe(res);
+}
+
 async function handleDownload(req, res, trackUrl, title, artist, format = 'mp3', quality = '0', startParam = null, endParam = null, raw = false, trackId = null, streamUrlParam = null) {
   if (!trackUrl && (!title || !artist)) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -2223,6 +2424,27 @@ async function handleDownload(req, res, trackUrl, title, artist, format = 'mp3',
     if (vidMatch) cleanId = cleanTrackId(vidMatch[1]);
   }
 
+  const downloadKey = !isRaw ? JSON.stringify([cleanId || targetUrl, cleanArtist, cleanTitle, ext, safeQuality, start, end]) : null;
+  if (downloadKey && downloadInFlight.has(downloadKey)) {
+    const outcome = await downloadInFlight.get(downloadKey);
+    res.writeHead(outcome.status, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(outcome.body));
+  }
+
+  let resolveDownload;
+  const downloadPromise = downloadKey ? new Promise(resolve => { resolveDownload = resolve; }) : null;
+  if (downloadKey) downloadInFlight.set(downloadKey, downloadPromise);
+  let downloadOutcome = null;
+  const sendDownloadResponse = (status, body) => {
+    downloadOutcome = { status, body };
+    if (resolveDownload) resolveDownload(downloadOutcome);
+    if (!res.writableEnded) {
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
+    }
+  };
+
+  try {
   const cachedFile = cleanId ? await findCachedFile(cleanId) : null;
   if (cachedFile) {
     const ffmpegBin = resolveBinary('ffmpeg');
@@ -2258,18 +2480,14 @@ async function handleDownload(req, res, trackUrl, title, artist, format = 'mp3',
           ffmpegProc.on('error', reject);
         });
         downloadsIndex = null;
-        if (!res.writableEnded) {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify(isRaw ? {
-            success: true,
-            tempName: tempName
-          } : {
-            success: true,
-            filename: outFilename,
-            directory: downloadsDir
-          }));
-        }
-        return;
+        return sendDownloadResponse(200, isRaw ? {
+          success: true,
+          tempName: tempName
+        } : {
+          success: true,
+          filename: outFilename,
+          directory: downloadsDir
+        });
       } catch (cachedErr) {
         try { await fs.promises.unlink(outPath); } catch (_) {}
       }
@@ -2339,20 +2557,20 @@ async function handleDownload(req, res, trackUrl, title, artist, format = 'mp3',
       await cleanupDownloadArtifacts(downloadsDir, beforeFiles, baseName, videoId, ext, true);
       downloadsIndex = null;
     }
-    if (!res.writableEnded) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(isRaw ? {
-        success: true,
-        tempName: tempName
-      } : {
-        success: true,
-        filename: outFilename,
-        directory: downloadsDir
-      }));
-    }
+    sendDownloadResponse(200, isRaw ? {
+      success: true,
+      tempName: tempName
+    } : {
+      success: true,
+      filename: outFilename,
+      directory: downloadsDir
+    });
   } catch (err) {
     try { logger.error('Download primary failed: ' + (title || trackUrl), err); } catch (_) {}
-    if (res.writableEnded) return;
+    if (res.writableEnded) {
+      sendDownloadResponse(500, { success: false, error: err.message });
+      return;
+    }
     try {
       const fallbackArgs = [
         '--no-playlist',
@@ -2377,17 +2595,14 @@ async function handleDownload(req, res, trackUrl, title, artist, format = 'mp3',
         await cleanupDownloadArtifacts(downloadsDir, beforeFiles, baseName, videoId, ext, true);
         downloadsIndex = null;
       }
-      if (!res.writableEnded) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(isRaw ? {
-          success: true,
-          tempName: tempName
-        } : {
-          success: true,
-          filename: outFilename,
-          directory: downloadsDir
-        }));
-      }
+      sendDownloadResponse(200, isRaw ? {
+        success: true,
+        tempName: tempName
+      } : {
+        success: true,
+        filename: outFilename,
+        directory: downloadsDir
+      });
     } catch (e2) {
       if (!isRaw) {
         await cleanupDownloadArtifacts(downloadsDir, beforeFiles, baseName, videoId, ext, false);
@@ -2395,10 +2610,15 @@ async function handleDownload(req, res, trackUrl, title, artist, format = 'mp3',
         await cleanupPartial();
       }
       try { logger.error('Download failure: ' + (title || trackUrl) + ' (' + (e2.message || err.message) + ')', e2); } catch (_) {}
-      if (!res.writableEnded) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: e2.message || err.message }));
-      }
+      sendDownloadResponse(500, { success: false, error: e2.message || err.message });
+    }
+  }
+  } finally {
+    if (downloadKey && downloadInFlight.get(downloadKey) === downloadPromise) {
+      downloadInFlight.delete(downloadKey);
+    }
+    if (resolveDownload && !downloadOutcome) {
+      resolveDownload({ status: 500, body: { success: false, error: 'Download ended without a result' } });
     }
   }
 }
@@ -2700,12 +2920,30 @@ function getFetchedLyricsPath(title, artist) {
 
 async function handleLyrics(req, res, title, artist, allowOnline = true) {
   const cacheKey = `${artist}:${title}`;
-  if (lyricsCache.has(cacheKey)) {
-    const cached = lyricsCache.get(cacheKey);
+  const cached = lyricsCache.get(cacheKey);
+  if (cached?.promise) {
+    const outcome = await cached.promise;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(outcome));
+  }
+  if (cached) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ success: true, lyrics: cached.text, isCustom: cached.isCustom || false }));
   }
 
+  let resolveLyrics;
+  const lyricsPromise = new Promise(resolve => { resolveLyrics = resolve; });
+  const inFlightEntry = { promise: lyricsPromise };
+  lyricsCache.set(cacheKey, inFlightEntry);
+  let outcome = null;
+  const sendLyrics = (lyrics, isCustom = false) => {
+    outcome = { success: true, lyrics, isCustom };
+    resolveLyrics(outcome);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(outcome));
+  };
+
+  try {
   let customPath = getCustomLyricsPath(title, artist);
   if (!fs.existsSync(customPath) && /^[\x00-\x7F]*$/.test((title || '') + (artist || ''))) {
     const legacyPath = legacyCustomLyricsPath(title, artist);
@@ -2717,9 +2955,10 @@ async function handleLyrics(req, res, title, artist, allowOnline = true) {
   if (fs.existsSync(customPath)) {
     try {
       const customLyrics = await fs.promises.readFile(customPath, 'utf-8');
-      lyricsCache.set(cacheKey, { text: customLyrics, isCustom: true });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ success: true, lyrics: customLyrics, isCustom: true }));
+      if (lyricsCache.get(cacheKey) === inFlightEntry) {
+        lyricsCache.set(cacheKey, { text: customLyrics, isCustom: true });
+      }
+      return sendLyrics(customLyrics, true);
     } catch (e) {}
   }
 
@@ -2734,15 +2973,15 @@ async function handleLyrics(req, res, title, artist, allowOnline = true) {
   if (fs.existsSync(fetchedLyricsPath)) {
     try {
       const diskLyrics = await fs.promises.readFile(fetchedLyricsPath, 'utf-8');
-      lyricsCache.set(cacheKey, { text: diskLyrics, isCustom: false });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ success: true, lyrics: diskLyrics, isCustom: false }));
+      if (lyricsCache.get(cacheKey) === inFlightEntry) {
+        lyricsCache.set(cacheKey, { text: diskLyrics, isCustom: false });
+      }
+      return sendLyrics(diskLyrics);
     } catch (e) {}
   }
 
   if (!allowOnline) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ success: true, lyrics: '' }));
+    return sendLyrics('');
   }
 
   try {
@@ -2752,13 +2991,21 @@ async function handleLyrics(req, res, title, artist, allowOnline = true) {
         await fs.promises.writeFile(fetchedLyricsPath, rawLyrics, 'utf-8');
       } catch (e) {}
     }
-    lyricsCache.set(cacheKey, { text: rawLyrics, isCustom: false });
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: true, lyrics: rawLyrics }));
+    if (lyricsCache.get(cacheKey) === inFlightEntry) {
+      lyricsCache.set(cacheKey, { text: rawLyrics, isCustom: false });
+    }
+    return sendLyrics(rawLyrics);
   } catch (err) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: true, lyrics: '' }));
+    return sendLyrics('');
+  }
+  } finally {
+    if (!outcome) {
+      outcome = { success: true, lyrics: '', isCustom: false };
+      resolveLyrics(outcome);
+    }
+    if (lyricsCache.get(cacheKey) === inFlightEntry) {
+      lyricsCache.delete(cacheKey);
+    }
   }
 }
 
@@ -3827,6 +4074,16 @@ function setAlbumCache(key, data) {
   albumCache.set(key, { data, expires: Date.now() + 15 * 60 * 1000 });
 }
 
+// iTunes serves a different catalog per storefront; use the user's region when known.
+function itunesCountryParam() {
+  try {
+    const code = process.versions.electron ? require('electron').app.getLocaleCountryCode() : '';
+    return /^[A-Za-z]{2}$/.test(code) ? `&country=${code.toUpperCase()}` : '';
+  } catch (e) {
+    return '';
+  }
+}
+
 function fetchItunesJson(url) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
@@ -3870,10 +4127,29 @@ async function handleAlbumSearch(req, res, parsedUrl) {
     return res.end(JSON.stringify(cached));
   }
 
+  const inFlight = albumCache.get(cacheKey);
+  if (inFlight?.promise) {
+    const outcome = await inFlight.promise;
+    res.writeHead(outcome.status, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(outcome.body));
+  }
+
+  let resolveSearch;
+  const searchPromise = new Promise(resolve => { resolveSearch = resolve; });
+  const inFlightEntry = { promise: searchPromise };
+  albumCache.set(cacheKey, inFlightEntry);
+  let outcome = null;
+  const sendResponse = (status, body) => {
+    outcome = { status, body };
+    resolveSearch(outcome);
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(body));
+  };
+
   try {
     const albumUrlMatch = q.match(/music\.apple\.com\/(?:[a-z]{2}\/)?album\/(?:[^/]+\/)?(\d+)/i);
     if (albumUrlMatch) {
-      const data = await fetchItunesJson(`https://itunes.apple.com/lookup?id=${albumUrlMatch[1]}&entity=album`);
+      const data = await fetchItunesJson(`https://itunes.apple.com/lookup?id=${albumUrlMatch[1]}&entity=album${itunesCountryParam()}`);
       const results = (data && Array.isArray(data.results)) ? data.results : [];
       const item = results.find(r => r && r.wrapperType === 'collection');
       if (item) {
@@ -3889,19 +4165,18 @@ async function handleAlbumSearch(req, res, parsedUrl) {
           }]
         };
         setAlbumCache(cacheKey, responseData);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify(responseData));
+        return sendResponse(200, responseData);
       }
     }
 
     const cleanQ = q.replace(/\s+-\s+/g, ' ').replace(/\bby\b/gi, ' ').replace(/\s+/g, ' ').trim();
     const urls = [
-      `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=album&media=music&limit=25`,
-      `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&limit=25`
+      `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=album&media=music&limit=25${itunesCountryParam()}`,
+      `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&limit=25${itunesCountryParam()}`
     ];
     if (cleanQ && cleanQ.toLowerCase() !== q.toLowerCase()) {
-      urls.push(`https://itunes.apple.com/search?term=${encodeURIComponent(cleanQ)}&entity=album&media=music&limit=25`);
-      urls.push(`https://itunes.apple.com/search?term=${encodeURIComponent(cleanQ)}&media=music&limit=25`);
+      urls.push(`https://itunes.apple.com/search?term=${encodeURIComponent(cleanQ)}&entity=album&media=music&limit=25${itunesCountryParam()}`);
+      urls.push(`https://itunes.apple.com/search?term=${encodeURIComponent(cleanQ)}&media=music&limit=25${itunesCountryParam()}`);
     }
 
     const responses = await Promise.all(urls.map(u => fetchItunesJson(u).catch(() => null)));
@@ -3955,6 +4230,70 @@ async function handleAlbumSearch(req, res, parsedUrl) {
     albums.sort((a, b) => scoreAlbum(b) - scoreAlbum(a));
     const responseData = { success: true, albums: albums.slice(0, 12) };
     setAlbumCache(cacheKey, responseData);
+    return sendResponse(200, responseData);
+  } catch (err) {
+    return sendResponse(502, { success: false, error: 'Album service unavailable' });
+  } finally {
+    if (!outcome) {
+      outcome = { status: 502, body: { success: false, error: 'Album service unavailable' } };
+      resolveSearch(outcome);
+    }
+    if (albumCache.get(cacheKey) === inFlightEntry) {
+      albumCache.delete(cacheKey);
+    }
+  }
+}
+
+async function handleArtistAlbums(req, res, parsedUrl) {
+  const name = (parsedUrl.query.name || '').trim();
+  if (!name) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ success: true, albums: [] }));
+  }
+  const cacheKey = `artist-albums:${name.toLowerCase()}`;
+  const cached = getAlbumCache(cacheKey);
+  if (cached) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(cached));
+  }
+  try {
+    const normalize = (s) => (s || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+    const target = normalize(name);
+    const artistSearch = await fetchItunesJson(`https://itunes.apple.com/search?term=${encodeURIComponent(name)}&entity=musicArtist&limit=10${itunesCountryParam()}`);
+    const artists = (artistSearch && Array.isArray(artistSearch.results)) ? artistSearch.results : [];
+    const best = artists.find(a => normalize(a.artistName) === target) || artists.find(a => normalize(a.artistName).includes(target) || target.includes(normalize(a.artistName))) || artists[0];
+    const albums = [];
+    const seen = new Set();
+    const addAlbum = (item) => {
+      if (!item || item.collectionId == null) return;
+      const title = item.collectionName || '';
+      if (/\s-\s*Single$/i.test(title)) return;
+      const normKey = normalize(title.replace(/\(.*?\)|\[.*?\]/g, ''));
+      if (seen.has(normKey)) return;
+      seen.add(normKey);
+      albums.push({
+        id: String(item.collectionId),
+        title,
+        artist: item.artistName || name,
+        year: item.releaseDate ? item.releaseDate.slice(0, 4) : '',
+        trackCount: item.trackCount || 0,
+        cover: (item.artworkUrl100 || '').replace('100x100', '600x600'),
+        date: item.releaseDate || ''
+      });
+    };
+    if (best && best.artistId != null) {
+      const lookup = await fetchItunesJson(`https://itunes.apple.com/lookup?id=${best.artistId}&entity=album&limit=200${itunesCountryParam()}`);
+      const items = (lookup && Array.isArray(lookup.results)) ? lookup.results : [];
+      items.filter(r => r && r.wrapperType === 'collection').forEach(addAlbum);
+    }
+    if (albums.length === 0) {
+      const fallback = await fetchItunesJson(`https://itunes.apple.com/search?term=${encodeURIComponent(name)}&entity=album&attribute=artistTerm&limit=200${itunesCountryParam()}`);
+      const items = (fallback && Array.isArray(fallback.results)) ? fallback.results : [];
+      items.filter(r => r && normalize(r.artistName).includes(target)).forEach(addAlbum);
+    }
+    albums.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const responseData = { success: true, albums };
+    setAlbumCache(cacheKey, responseData);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(responseData));
   } catch (err) {
@@ -3977,14 +4316,32 @@ async function handleAlbumTracks(req, res, parsedUrl) {
     return res.end(JSON.stringify(cached));
   }
 
+  const inFlight = albumCache.get(cacheKey);
+  if (inFlight?.promise) {
+    const outcome = await inFlight.promise;
+    res.writeHead(outcome.status, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(outcome.body));
+  }
+
+  let resolveLookup;
+  const lookupPromise = new Promise(resolve => { resolveLookup = resolve; });
+  const inFlightEntry = { promise: lookupPromise };
+  albumCache.set(cacheKey, inFlightEntry);
+  let outcome = null;
+  const sendResponse = (status, body) => {
+    outcome = { status, body };
+    resolveLookup(outcome);
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(body));
+  };
+
   try {
-    const url = `https://itunes.apple.com/lookup?id=${id}&entity=song`;
+    const url = `https://itunes.apple.com/lookup?id=${id}&entity=song${itunesCountryParam()}`;
     const data = await fetchItunesJson(url);
     const results = (data && Array.isArray(data.results)) ? data.results : [];
     const albumItem = results.find(r => r && r.wrapperType === 'collection');
     if (!albumItem) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ success: false, error: 'Album not found' }));
+      return sendResponse(404, { success: false, error: 'Album not found' });
     }
     const album = {
       id: String(albumItem.collectionId),
@@ -4007,11 +4364,17 @@ async function handleAlbumTracks(req, res, parsedUrl) {
 
     const responseData = { success: true, album, tracks };
     setAlbumCache(cacheKey, responseData);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify(responseData));
+    return sendResponse(200, responseData);
   } catch (err) {
-    res.writeHead(502, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ success: false, error: 'Album service unavailable' }));
+    return sendResponse(502, { success: false, error: 'Album service unavailable' });
+  } finally {
+    if (!outcome) {
+      outcome = { status: 502, body: { success: false, error: 'Album service unavailable' } };
+      resolveLookup(outcome);
+    }
+    if (albumCache.get(cacheKey) === inFlightEntry) {
+      albumCache.delete(cacheKey);
+    }
   }
 }
 
@@ -4019,6 +4382,16 @@ let hotPicksCache = { data: null, expires: 0 };
 
 async function handleHotPicks(req, res, parsedUrl) {
   const limit = Math.max(1, Math.min(25, parseInt(parsedUrl.query.limit || '12', 10) || 12));
+
+  if (hotPicksCache.promise) {
+    const outcome = await hotPicksCache.promise;
+    res.writeHead(outcome.status, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(outcome.body.success ? {
+      success: true,
+      title: outcome.body.title,
+      tracks: outcome.body.tracks.slice(0, limit)
+    } : outcome.body));
+  }
 
   if (hotPicksCache.data && Date.now() < hotPicksCache.expires) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -4029,16 +4402,25 @@ async function handleHotPicks(req, res, parsedUrl) {
     }));
   }
 
+  let resolveLookup;
+  const lookupPromise = new Promise(resolve => { resolveLookup = resolve; });
+  hotPicksCache = { data: null, expires: 0, promise: lookupPromise };
+  let outcome = null;
+  const sendResponse = (status, body) => {
+    outcome = { status, body };
+    resolveLookup(outcome);
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(body));
+  };
+
   try {
     const data = await fetchItunesJson('https://api.deezer.com/chart/0/tracks?limit=40');
     const rawItems = (data && Array.isArray(data.data)) ? data.data : [];
     const candidates = rawItems
       .filter(item => item && item.title && item.artist && item.artist.name)
       .map(item => ({ artist: item.artist.name, title: item.title }));
-
     if (candidates.length === 0) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ success: false }));
+      return sendResponse(200, { success: false });
     }
 
     const resolvedTracks = [];
@@ -4064,8 +4446,7 @@ async function handleHotPicks(req, res, parsedUrl) {
     await Promise.all([worker(), worker(), worker(), worker()]);
 
     if (resolvedTracks.length === 0) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ success: false }));
+      return sendResponse(200, { success: false });
     }
 
     const title = 'Hot picks ' + new Date().getFullYear();
@@ -4074,15 +4455,21 @@ async function handleHotPicks(req, res, parsedUrl) {
       expires: Date.now() + 60 * 60 * 1000
     };
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({
+    return sendResponse(200, {
       success: true,
       title,
-      tracks: resolvedTracks.slice(0, limit)
-    }));
+      tracks: resolvedTracks
+    });
   } catch (err) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ success: false }));
+    return sendResponse(200, { success: false });
+  } finally {
+    if (!outcome) {
+      outcome = { status: 200, body: { success: false } };
+      resolveLookup(outcome);
+    }
+    if (hotPicksCache.promise === lookupPromise) {
+      hotPicksCache = { data: null, expires: 0 };
+    }
   }
 }
 
@@ -4219,6 +4606,10 @@ const server = http.createServer(async (req, res) => {
 
   if (parsedUrl.pathname === '/api/albums/search') {
     return handleAlbumSearch(req, res, parsedUrl);
+  }
+
+  if (parsedUrl.pathname === '/api/artist-albums') {
+    return handleArtistAlbums(req, res, parsedUrl);
   }
 
   if (parsedUrl.pathname === '/api/albums/tracks') {
@@ -4469,18 +4860,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (parsedUrl.pathname === '/api/library') {
-    const list = Object.values(libraryIndex)
-      .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
-      .map(item => ({
+    const items = Object.values(libraryIndex).sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+    queueLocalCovers(items.map(item => item.id));
+    const list = items.map(item => ({
         id: item.id,
         platform: 'local',
         title: item.title,
         artist: item.artist,
         duration: Number(item.duration) || 0,
-        thumbnail: ''
+        thumbnail: fs.existsSync(localCoverPath(item.id)) ? `http://127.0.0.1:${PORT}/api/local-cover?id=${encodeURIComponent(item.id)}` : ''
       }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(list));
+  }
+
+  if (parsedUrl.pathname === '/api/local-cover') {
+    return handleLocalCover(req, res, parsedUrl);
   }
 
   if (parsedUrl.pathname === '/api/library-file') {
